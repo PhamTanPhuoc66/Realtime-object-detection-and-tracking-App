@@ -11,6 +11,7 @@ import time
 from starlette.websockets import WebSocketState
 import threading
 from backend.yolo_processor import YOLOProcessor
+from backend.pca_yunet_processor import YuNetProcessor
 from backend.attendance_tracker import AttendanceTracker
 import os
 from contextlib import asynccontextmanager
@@ -40,7 +41,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 # Server Config
-host = "0.0.0.0"  # Listen on all interfaces for ngrok
+host = "127.0.0.1"  # Listen on all interfaces for ngrok
 port = 8080
 max_clients = 4
 batch_size = 10
@@ -58,6 +59,7 @@ if not os.path.exists(model_path):
 client_queues = {}
 client_queues_lock = asyncio.Lock()
 yolo_processor = YOLOProcessor(model_path=model_path)
+yunet_processor = YuNetProcessor(model_path=os.path.join(MODELS_DIR, 'face_detection_yunet_2023mar.onnx'))
 attendance_tracker = AttendanceTracker(csv_path=log_path)
 
 # CORS middleware
@@ -141,6 +143,88 @@ async def websocket_webcam_stream(websocket: WebSocket):
             except Exception as e:
                 print(f"[WebSocket] Error closing WebSocket for session {session_id}: {e}")
 
+# async def frame_processor_task():
+#     print("[Processor] Thread started, waiting for frames from clients.")
+#     process_frame_count = 0
+#     process_start_time = time.time()
+
+#     while global_processor_running:
+#         frames_to_process = []
+#         client_session_ids = []
+
+#         async with client_queues_lock:
+#             for session_id in list(client_queues.keys()):
+#                 input_queue = client_queues[session_id]["input"]
+#                 if not input_queue.empty():
+#                     while input_queue.qsize() > 1:
+#                         await input_queue.get()
+
+#                     try:
+#                         frame_data_bytes = await asyncio.wait_for(input_queue.get(), timeout=0.05)
+#                         np_arr = np.frombuffer(frame_data_bytes, np.uint8)
+#                         frame_decoded = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+#                         if frame_decoded is not None:
+#                             frames_to_process.append(frame_decoded)
+#                             client_session_ids.append(session_id)
+#                         else:
+#                             print(f"[Processor] Could not decode frame for session {session_id}. Skipping.")
+#                     except asyncio.TimeoutError:
+#                         continue
+#                     except Exception as e:
+#                         print(f"[Processor] Error getting frame for session {session_id}: {e}")
+#                         import traceback
+#                         traceback.print_exc()
+
+#         if frames_to_process:
+#             try:
+#                 # processed_frames_batch = yolo_processor.process_frames(frames_to_process)
+#                 processed_frames_batch = yunet_processor.process_frames(frames_to_process)  # Thêm này
+                
+#                 # for idx, processed_frame in enumerate(processed_frames_batch):
+#                 #     session_id = client_session_ids[idx]
+#                 #     results = yolo_processor.model(processed_frame, verbose=False)
+#                 #     detections = [
+#                 #         {
+#                 #             "class_name": yolo_processor.model.names[int(cls)],
+#                 #             "confidence": conf,
+#                 #             "box": box.xyxy[0].cpu().numpy()
+#                 #         }
+#                 #         for box, cls, conf in zip(results[0].boxes, results[0].boxes.cls, results[0].boxes.conf)
+#                 #         if results[0].boxes is not None
+#                 #     ]
+#                 #     attendance_tracker.track_objects(detections, session_id)
+
+#                 for idx, processed_frame in enumerate(processed_frames_batch):
+#                     session_id = client_session_ids[idx]
+#                     if session_id in client_queues:
+#                         output_queue = client_queues[session_id]["output"]
+#                         ret_proc, buffer_proc = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+
+#                         if ret_proc:
+#                             try:
+#                                 if output_queue.qsize() >= max_queue_size_output:
+#                                     output_queue.get_nowait()
+#                                 output_queue.put_nowait(buffer_proc.tobytes())
+#                             except asyncio.QueueFull:
+#                                 print(f"[Processor] Output queue full for session {session_id}, dropping frame")
+#                             except Exception as e:
+#                                 print(f"[Processor] Error putting frame to output queue for session {session_id}: {e}")
+#                         else:
+#                             print(f"[Processor] Could not encode processed frame for session {session_id}.")
+
+#                 process_frame_count += len(frames_to_process)
+#                 if time.time() - process_start_time >= 1.0:
+#                     print(f"[Processor] Processed {process_frame_count} frames in 1s. FPS: {process_frame_count / (time.time() - process_start_time):.2f}")
+#                     process_frame_count = 0
+#                     process_start_time = time.time()
+#             except Exception as e:
+#                 print(f"[Processor] Error processing batch: {e}")
+#                 import traceback
+#                 traceback.print_exc()
+
+#         await asyncio.sleep(0.001)
+
 async def frame_processor_task():
     print("[Processor] Thread started, waiting for frames from clients.")
     process_frame_count = 0
@@ -176,26 +260,22 @@ async def frame_processor_task():
 
         if frames_to_process:
             try:
-                processed_frames_batch = yolo_processor.process_frames(frames_to_process)
+                processed_frames_batch, detections_batch = yunet_processor.process_frames(frames_to_process)
                 
-                for idx, processed_frame in enumerate(processed_frames_batch):
+                for idx, (processed_frame, detections) in enumerate(zip(processed_frames_batch, detections_batch)):
                     session_id = client_session_ids[idx]
-                    results = yolo_processor.model(processed_frame, verbose=False)
-                    detections = [
-                        {
-                            "class_name": yolo_processor.model.names[int(cls)],
-                            "confidence": conf,
-                            "box": box.xyxy[0].cpu().numpy()
-                        }
-                        for box, cls, conf in zip(results[0].boxes, results[0].boxes.cls, results[0].boxes.conf)
-                        if results[0].boxes is not None
-                    ]
                     attendance_tracker.track_objects(detections, session_id)
 
-                for idx, processed_frame in enumerate(processed_frames_batch):
-                    session_id = client_session_ids[idx]
                     if session_id in client_queues:
                         output_queue = client_queues[session_id]["output"]
+                        # Debug: Check processed_frame
+                        print(f"[Processor] Processed frame type: {type(processed_frame)}, shape: {processed_frame.shape if hasattr(processed_frame, 'shape') else 'None'}, dtype: {processed_frame.dtype if hasattr(processed_frame, 'dtype') else 'None'}")
+                        # Ensure processed_frame is a valid numpy array
+                        if not isinstance(processed_frame, np.ndarray) or processed_frame.size == 0 or len(processed_frame.shape) != 3:
+                            print(f"[Processor] Invalid processed frame for session {session_id}, replacing with default.")
+                            processed_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        # Convert to cv::UMat if needed
+                        processed_frame = cv2.UMat(processed_frame)
                         ret_proc, buffer_proc = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
                         if ret_proc:
@@ -221,7 +301,6 @@ async def frame_processor_task():
                 traceback.print_exc()
 
         await asyncio.sleep(0.001)
-
 async def receive_frames(websocket: WebSocket, session_id: str):
     while websocket.client_state == WebSocketState.CONNECTED:
         try:
@@ -278,8 +357,8 @@ def run():
 
     try:
         from pyngrok import ngrok
-        public_url = ngrok.connect(port, bind_tls=True).public_url
-        print(f"FastAPI Public URL (ngrok): {public_url}")
+        # public_url = ngrok.connect(port, bind_tls=True).public_url
+        # print(f"FastAPI Public URL (ngrok): {public_url}")
     except ImportError:
         print("Ngrok not installed, running FastAPI locally at:", local_url)
     except Exception as e:
