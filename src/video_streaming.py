@@ -10,7 +10,7 @@ import uuid
 import time
 from starlette.websockets import WebSocketState
 import threading
-from backend.yolo_processor import YOLOProcessor
+# from backend.yolo_processor import YOLOProcessor
 from backend.pca_yunet_processor import YuNetProcessor
 from backend.attendance_tracker import AttendanceTracker
 import os
@@ -49,16 +49,16 @@ max_queue_size_input = 2
 max_queue_size_output = 2
 
 # Paths
-model_path = os.path.join(MODELS_DIR, 'yolov8n.pt')
+# model_path = os.path.join(MODELS_DIR, 'yolov8n.pt')
 log_path = os.path.join(LOGS_DIR, 'attendance_log.csv')
 
-if not os.path.exists(model_path):
-    raise FileNotFoundError(f"YOLO model file not found at {model_path}")
+# if not os.path.exists(model_path):
+#     raise FileNotFoundError(f"YOLO model file not found at {model_path}")
 
 # Init processing classes
 client_queues = {}
 client_queues_lock = asyncio.Lock()
-yolo_processor = YOLOProcessor(model_path=model_path)
+# yolo_processor = YOLOProcessor(model_path=model_path)
 yunet_processor = YuNetProcessor(model_path=os.path.join(MODELS_DIR, 'face_detection_yunet_2023mar.onnx'))
 attendance_tracker = AttendanceTracker(csv_path=log_path)
 
@@ -225,7 +225,7 @@ async def websocket_webcam_stream(websocket: WebSocket):
 
 #         await asyncio.sleep(0.001)
 
-async def frame_processor_task():
+async def frame_processor_task(): ### Nam Nghĩa xử lí hàm này
     print("[Processor] Thread started, waiting for frames from clients.")
     process_frame_count = 0
     process_start_time = time.time()
