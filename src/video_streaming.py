@@ -16,6 +16,9 @@ from backend.attendance_tracker import AttendanceTracker
 import os
 from contextlib import asynccontextmanager
 
+import pickle
+from backend.pca_yunet_processor import YuNetProcessor, PCA
+
 # === Absolute Base Directory ===
 CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_FILE_DIR, ".."))
@@ -58,9 +61,14 @@ log_path = os.path.join(LOGS_DIR, 'attendance_log.csv')
 # Init processing classes
 client_queues = {}
 client_queues_lock = asyncio.Lock()
-# yolo_processor = YOLOProcessor(model_path=model_path)
+
 yunet_processor = YuNetProcessor(model_path=os.path.join(MODELS_DIR, 'face_detection_yunet_2023mar.onnx'))
 attendance_tracker = AttendanceTracker(csv_path=log_path)
+
+with open(os.path.join(MODELS_DIR, 'pca_model.pkl'), 'rb') as f:
+    pca_model = pickle.load(f)
+pca_model.image_size = (92, 112)
+pca_model.N = 92 * 112
 
 # CORS middleware
 app.add_middleware(
@@ -143,89 +151,9 @@ async def websocket_webcam_stream(websocket: WebSocket):
             except Exception as e:
                 print(f"[WebSocket] Error closing WebSocket for session {session_id}: {e}")
 
-# async def frame_processor_task():
-#     print("[Processor] Thread started, waiting for frames from clients.")
-#     process_frame_count = 0
-#     process_start_time = time.time()
 
-#     while global_processor_running:
-#         frames_to_process = []
-#         client_session_ids = []
 
-#         async with client_queues_lock:
-#             for session_id in list(client_queues.keys()):
-#                 input_queue = client_queues[session_id]["input"]
-#                 if not input_queue.empty():
-#                     while input_queue.qsize() > 1:
-#                         await input_queue.get()
-
-#                     try:
-#                         frame_data_bytes = await asyncio.wait_for(input_queue.get(), timeout=0.05)
-#                         np_arr = np.frombuffer(frame_data_bytes, np.uint8)
-#                         frame_decoded = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-#                         if frame_decoded is not None:
-#                             frames_to_process.append(frame_decoded)
-#                             client_session_ids.append(session_id)
-#                         else:
-#                             print(f"[Processor] Could not decode frame for session {session_id}. Skipping.")
-#                     except asyncio.TimeoutError:
-#                         continue
-#                     except Exception as e:
-#                         print(f"[Processor] Error getting frame for session {session_id}: {e}")
-#                         import traceback
-#                         traceback.print_exc()
-
-#         if frames_to_process:
-#             try:
-#                 # processed_frames_batch = yolo_processor.process_frames(frames_to_process)
-#                 processed_frames_batch = yunet_processor.process_frames(frames_to_process)  # Thêm này
-                
-#                 # for idx, processed_frame in enumerate(processed_frames_batch):
-#                 #     session_id = client_session_ids[idx]
-#                 #     results = yolo_processor.model(processed_frame, verbose=False)
-#                 #     detections = [
-#                 #         {
-#                 #             "class_name": yolo_processor.model.names[int(cls)],
-#                 #             "confidence": conf,
-#                 #             "box": box.xyxy[0].cpu().numpy()
-#                 #         }
-#                 #         for box, cls, conf in zip(results[0].boxes, results[0].boxes.cls, results[0].boxes.conf)
-#                 #         if results[0].boxes is not None
-#                 #     ]
-#                 #     attendance_tracker.track_objects(detections, session_id)
-
-#                 for idx, processed_frame in enumerate(processed_frames_batch):
-#                     session_id = client_session_ids[idx]
-#                     if session_id in client_queues:
-#                         output_queue = client_queues[session_id]["output"]
-#                         ret_proc, buffer_proc = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-
-#                         if ret_proc:
-#                             try:
-#                                 if output_queue.qsize() >= max_queue_size_output:
-#                                     output_queue.get_nowait()
-#                                 output_queue.put_nowait(buffer_proc.tobytes())
-#                             except asyncio.QueueFull:
-#                                 print(f"[Processor] Output queue full for session {session_id}, dropping frame")
-#                             except Exception as e:
-#                                 print(f"[Processor] Error putting frame to output queue for session {session_id}: {e}")
-#                         else:
-#                             print(f"[Processor] Could not encode processed frame for session {session_id}.")
-
-#                 process_frame_count += len(frames_to_process)
-#                 if time.time() - process_start_time >= 1.0:
-#                     print(f"[Processor] Processed {process_frame_count} frames in 1s. FPS: {process_frame_count / (time.time() - process_start_time):.2f}")
-#                     process_frame_count = 0
-#                     process_start_time = time.time()
-#             except Exception as e:
-#                 print(f"[Processor] Error processing batch: {e}")
-#                 import traceback
-#                 traceback.print_exc()
-
-#         await asyncio.sleep(0.001)
-
-async def frame_processor_task(): ### Nam Nghĩa xử lí hàm này
+async def frame_processor_task():
     print("[Processor] Thread started, waiting for frames from clients.")
     process_frame_count = 0
     process_start_time = time.time()
@@ -260,21 +188,50 @@ async def frame_processor_task(): ### Nam Nghĩa xử lí hàm này
 
         if frames_to_process:
             try:
-                processed_frames_batch, detections_batch = yunet_processor.process_frames(frames_to_process)
-                
-                for idx, (processed_frame, detections) in enumerate(zip(processed_frames_batch, detections_batch)):
+                processed_frames_batch, detections_batch, face_crops_batch = yunet_processor.process_frames(frames_to_process)
+
+                for idx, (processed_frame, detections, face_crops) in enumerate(zip(processed_frames_batch, detections_batch, face_crops_batch)):
                     session_id = client_session_ids[idx]
+
+                    for det, face_crop in zip(detections, face_crops):
+                        try:
+                            if face_crop.shape[0] < 20 or face_crop.shape[1] < 20:
+                                continue
+
+                            # ✅ Resize face crop về (92, 112)
+                            target_width, target_height = pca_model.image_size[1], pca_model.image_size[0]
+                            gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+                            resized_face = cv2.resize(gray_crop, (target_width, target_height)).astype(np.float32)
+
+                            # ✅ Flatten
+                            face_vector = resized_face.flatten().reshape(-1, 1)
+
+                            if face_vector.shape != (pca_model.N, 1):
+                                print(f"[Warning] Skipped face with invalid shape: {face_vector.shape}, expected: {(pca_model.N, 1)}")
+                                continue
+
+                            # ✅ Nhận diện PCA
+                            label = pca_model.recognize_face(face_vector, threshold=4000)
+                            det["label"] = label  # Gắn label vào detection
+
+                            # ✅ Vẽ bbox và label từ PCA
+                            x1, y1, x2, y2 = det["box"]
+                            cv2.rectangle(processed_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.putText(processed_frame, str(label), (x1, y1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        except Exception as face_e:
+                            print(f"[Processor] Error recognizing face: {face_e}")
+
+                    # ✅ Ghi nhận người dựa vào label PCA
                     attendance_tracker.track_objects(detections, session_id)
 
                     if session_id in client_queues:
                         output_queue = client_queues[session_id]["output"]
-                        # Debug: Check processed_frame
-                        print(f"[Processor] Processed frame type: {type(processed_frame)}, shape: {processed_frame.shape if hasattr(processed_frame, 'shape') else 'None'}, dtype: {processed_frame.dtype if hasattr(processed_frame, 'dtype') else 'None'}")
-                        # Ensure processed_frame is a valid numpy array
+
                         if not isinstance(processed_frame, np.ndarray) or processed_frame.size == 0 or len(processed_frame.shape) != 3:
                             print(f"[Processor] Invalid processed frame for session {session_id}, replacing with default.")
                             processed_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                        # Convert to cv::UMat if needed
+
                         processed_frame = cv2.UMat(processed_frame)
                         ret_proc, buffer_proc = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
@@ -301,6 +258,10 @@ async def frame_processor_task(): ### Nam Nghĩa xử lí hàm này
                 traceback.print_exc()
 
         await asyncio.sleep(0.001)
+
+
+
+
 async def receive_frames(websocket: WebSocket, session_id: str):
     while websocket.client_state == WebSocketState.CONNECTED:
         try:

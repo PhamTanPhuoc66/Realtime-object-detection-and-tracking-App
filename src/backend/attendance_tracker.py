@@ -52,7 +52,8 @@ class AttendanceTracker:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         for detection in detections:
-            class_name = detection['class_name']
+            # class_name = detection['class_name']
+            class_name = detection.get("label") or detection.get("class_name", "unknown")
             # Only log the class if it hasn't been logged before
             if class_name not in self.tracked_classes:
                 self._log_attendance(class_name, current_time)
