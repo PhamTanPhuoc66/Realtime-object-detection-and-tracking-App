@@ -170,7 +170,7 @@ async def frame_processor_task():
                         await input_queue.get()
 
                     try:
-                        frame_data_bytes = await asyncio.wait_for(input_queue.get(), timeout=0.05)
+                        frame_data_bytes = await asyncio.wait_for(input_queue.get(), timeout=0.01)
                         np_arr = np.frombuffer(frame_data_bytes, np.uint8)
                         frame_decoded = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
